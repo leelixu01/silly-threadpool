@@ -31,10 +31,13 @@ public:
         -> std::future<typename std::invoke_result_t<F, Args...>>;
     
 
+    size_t getTasksCompleted() const;
+    size_t getTasksQueued() const;
+    size_t getThreadCount() const;
+
+
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
-
-    size_t queueSize() const;
 
 private:
     void worker();
@@ -47,6 +50,9 @@ private:
     std::condition_variable cv_;
     std::atomic<bool> stop_{false};
 
+    // 原子计数器
+    std::atomic<size_t> tasks_completed_{0};
+    std::atomic<size_t> tasks_queued_{0};
 };
 
 template<typename F>
@@ -92,11 +98,18 @@ auto ThreadPool::enqueueWithResult(F&& f, Args&&... args)
     return res;
 }
 
+inline size_t ThreadPool::getTasksCompleted() const {
+    return tasks_completed_.load(std::memory_order_relaxed);
+}
 
-// 获取当前队列大小
-inline size_t ThreadPool::queueSize() const {
+
+inline size_t ThreadPool::getTasksQueued() const {
     std::unique_lock<std::mutex> lock(queue_mutex_);
     return tasks_.size();
+}
+
+inline size_t ThreadPool::getThreadCount() const {
+    return workers_.size();
 }
 
 #endif 

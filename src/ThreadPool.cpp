@@ -1,4 +1,5 @@
 #include "ThreadPool.h"
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -40,6 +41,7 @@ void ThreadPool::worker() {
         }
 
         task();
+        tasks_completed_.fetch_add(1, std::memory_order_relaxed);
     }
 }
  
