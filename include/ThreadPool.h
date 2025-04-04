@@ -17,8 +17,9 @@
 class ThreadPool {
 public:
     using Task = std::function<void()>;
+    using Priority = unsigned;
 
-    explicit ThreadPool(std::size_t num_threads);
+    explicit ThreadPool(std::size_t num_threads = std::thread::hardware_concurrency());
     ~ThreadPool();
 
     // 添加任务到队列
@@ -30,6 +31,21 @@ public:
     auto enqueueWithResult(F&& f, Args&&... args)
         -> std::future<typename std::invoke_result_t<F, Args...>>;
     
+    // 带优先级的任务提交
+    template<typename F>
+    void enqueueWithPriority(F&& task, Priority priority);
+
+    // 批量提交任务
+    template<typename F>
+    void enqueueBatch(std::vector<F>&& tasks);
+
+    // 异步执行函数(类似std::async但使用线程池)
+    template<typename F, typename... Args>
+    auto async(F&& f, Args&&... args)
+        -> std::future<typename std::invoke_result_t<F, Args...>>;
+
+    // 等待所有任务完成
+    void waitAll();
 
     size_t getTasksCompleted() const;
     size_t getTasksQueued() const;
@@ -40,10 +56,19 @@ public:
     ThreadPool& operator=(const ThreadPool&) = delete;
 
 private:
+    struct PriorityTask {
+        Task task;
+        Priority priority;
+        
+        bool operator<(const PriorityTask& other) const {
+            return priority < other.priority; // 更高优先级的值更小
+        }
+    };
+
     void worker();
 
     std::vector<std::thread> workers_;
-    std::queue<Task> tasks_;
+    std::priority_queue<PriorityTask> tasks_;
 
     // 同步原语
     mutable std::mutex queue_mutex_;
@@ -52,50 +77,53 @@ private:
 
     // 原子计数器
     std::atomic<size_t> tasks_completed_{0};
-    std::atomic<size_t> tasks_queued_{0};
+    std::atomic<size_t> active_tasks_{0};
 };
 
 template<typename F>
-void ThreadPool::enqueue(F&& task) {
+void ThreadPool::enqueueWithPriority(F&& task, Priority priority) {
     {
         std::unique_lock<std::mutex> lock(queue_mutex_);
-        tasks_.emplace(std::forward<F>(task));
+        tasks_.push({std::forward<F>(task), priority});
     }
-    // 通知进程有任务可以获取了
     cv_.notify_one();
 }
 
-// 模板函数：用于向线程池中添加带返回值的任务
+template<typename F>
+void ThreadPool::enqueue(F&& task) {
+    enqueueWithPriority(std::forward<F>(task), 0);
+}
+
 template<typename F, typename... Args>
 auto ThreadPool::enqueueWithResult(F&& f, Args&&... args)
-        -> std::future<typename std::invoke_result_t<F, Args...>> {
+    -> std::future<typename std::invoke_result_t<F, Args...>> {
     
-    // 推导出函数 f 在传入 args... 参数后所返回的类型
     using return_type = typename std::invoke_result_t<F, Args...>;
-
-    // 创建一个 packaged_task 封装任务，使用 bind 绑定参数，延迟执行
-    // 使用 shared_ptr 管理 task 生命周期，避免提前释放
+    
     auto task = std::make_shared<std::packaged_task<return_type()>>(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...)
-    );
-
-    // 获取与 task 关联的 future，用于异步获取任务结果
+        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+    
     std::future<return_type> res = task->get_future();
-
-    {
-        // 线程安全地向任务队列中添加任务
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-
-        // 将任务封装为一个无参数、无返回值的函数对象加入队列
-        // 实际上调用的是 shared_ptr 封装的 packaged_task 的 operator()
-        tasks_.emplace([task]() { (*task)(); });
-    }
-
-    // 通知一个等待的线程有新任务可处理
-    cv_.notify_one();
-
-    // 返回 future 给调用者，用于获取异步任务的返回值
+    enqueue([task]() { (*task)(); });
     return res;
+}
+
+// 非const版本，支持移动语义
+template<typename F>
+void ThreadPool::enqueueBatch(std::vector<F>&& tasks) {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+    for (auto& task : tasks) {
+        tasks_.push(PriorityTask{
+            Task(std::forward<F>(task)),  // 完美转发
+            0
+        });
+    }
+    cv_.notify_all();
+}
+template<typename F, typename... Args>
+auto ThreadPool::async(F&& f, Args&&... args)
+    -> std::future<typename std::invoke_result_t<F, Args...>> {
+    return enqueueWithResult(std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 inline size_t ThreadPool::getTasksCompleted() const {

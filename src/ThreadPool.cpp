@@ -36,12 +36,27 @@ void ThreadPool::worker() {
                 return;
             }
 
-            task = std::move(tasks_.front());
+            task = std::move(tasks_.top().task);
             tasks_.pop();
+            active_tasks_++;
         }
 
-        task();
-        tasks_completed_.fetch_add(1, std::memory_order_relaxed);
+        try {
+            task();
+        } catch (...) {
+            // 捕获所有异常防止线程退出
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            std::cerr << "Exception in worker thread\n";
+        }
+
+        tasks_completed_++;
+        active_tasks_--;
+        cv_.notify_all(); // 通知waitAll可能等待的线程
     }
+}
+
+void ThreadPool::waitAll() {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+    cv_.wait(lock, [this] { return tasks_.empty() && active_tasks_ == 0; });
 }
  
